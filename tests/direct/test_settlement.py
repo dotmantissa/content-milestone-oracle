@@ -9,7 +9,7 @@ movement is asserted in ``tests/integration``.
 
 import pytest
 
-from conftest import DAY, GEN, GITHUB_URL, SIX_HOURS, github_page, warp_by
+from conftest import DAY, GEN, GITHUB_URL, github_page, warp_by
 
 
 # ---------------------------------------------------------------------------
