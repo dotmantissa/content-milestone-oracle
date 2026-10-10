@@ -307,6 +307,24 @@ def _zero_address() -> Address:
     return Address(bytes(20))
 
 
+def _as_address(value: typing.Any, label: str) -> Address:
+    """
+    Normalise an address argument, or fail deterministically.
+
+    The ABI types these parameters as addresses, but a caller can still encode a
+    raw twenty byte value. Both denote the same thing, so accept either and turn
+    anything else into a classified business-logic error rather than letting it
+    surface later as an opaque VM fault. Deterministic errors must match
+    verbatim across validators, so they need to be raised deliberately.
+    """
+    if isinstance(value, Address):
+        return value
+    try:
+        return Address(value)
+    except Exception:
+        raise gl.vm.UserError(f"{ERROR_EXPECTED} {label} is not a valid address")
+
+
 def _clip(text: str, limit: int) -> str:
     text = str(text)
     if len(text) <= limit:
@@ -1524,9 +1542,13 @@ class ContentMilestoneOracle(gl.Contract):
             return result
 
         # fail or unreadable: the claim did not carry. The creator keeps the
-        # right to claim again while the deadline stands.
+        # right to claim again while the deadline stands. The borderline ladder
+        # belongs to a claim rather than to the milestone, so it resets here
+        # just as it does on `withdraw_claim`: a fresh claim gets a fresh set of
+        # re-checks.
         milestone.deferred_until = u256(0)
         milestone.claimed_at = u256(0)
+        milestone.defer_rounds = u256(0)
         if now > int(milestone.deadline_ts):
             self._set_status(milestone, STATUS_EXPIRED)
             MilestoneExpired(
@@ -1546,6 +1568,7 @@ class ContentMilestoneOracle(gl.Contract):
     def transfer_ownership(self, new_owner: Address) -> None:
         """Hand administration to another address."""
         self._require_owner()
+        new_owner = _as_address(new_owner, "new_owner")
         if new_owner == _zero_address():
             raise gl.vm.UserError(f"{ERROR_EXPECTED} new owner must not be the zero address")
         self.owner = new_owner
@@ -1628,6 +1651,7 @@ class ContentMilestoneOracle(gl.Contract):
         it, rather than re-checking before every payout.
         """
         self._require_owner()
+        fee_recipient = _as_address(fee_recipient, "fee_recipient")
         if fee_bps < 0:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} fee_bps must not be negative")
         if int(fee_bps) > int(self.fee_bps):
@@ -1762,6 +1786,7 @@ class ContentMilestoneOracle(gl.Contract):
         contract balance minus every unresolved reward.
         """
         self._require_owner()
+        to = _as_address(to, "to")
         if amount_atto <= 0:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} amount must be positive")
         surplus = int(self.balance) - int(self.total_escrowed_atto)
@@ -1818,6 +1843,7 @@ class ContentMilestoneOracle(gl.Contract):
             raise gl.vm.UserError(
                 f"{ERROR_EXPECTED} reward below the minimum of {int(self.min_reward_atto)} wei"
             )
+        creator = _as_address(creator, "creator")
         if creator == _zero_address():
             raise gl.vm.UserError(f"{ERROR_EXPECTED} creator must not be the zero address")
         if creator == gl.message.contract_address:
@@ -2338,26 +2364,26 @@ class ContentMilestoneOracle(gl.Contract):
 
     @gl.public.view
     def list_by_sponsor(self, sponsor: Address, offset: int, limit: int) -> list[dict]:
-        ids = self.by_sponsor.get(sponsor)
+        ids = self.by_sponsor.get(_as_address(sponsor, "sponsor"))
         if ids is None:
             return []
         return self._page(ids, offset, limit)
 
     @gl.public.view
     def list_by_creator(self, creator: Address, offset: int, limit: int) -> list[dict]:
-        ids = self.by_creator.get(creator)
+        ids = self.by_creator.get(_as_address(creator, "creator"))
         if ids is None:
             return []
         return self._page(ids, offset, limit)
 
     @gl.public.view
     def count_by_sponsor(self, sponsor: Address) -> int:
-        ids = self.by_sponsor.get(sponsor)
+        ids = self.by_sponsor.get(_as_address(sponsor, "sponsor"))
         return 0 if ids is None else len(ids)
 
     @gl.public.view
     def count_by_creator(self, creator: Address) -> int:
-        ids = self.by_creator.get(creator)
+        ids = self.by_creator.get(_as_address(creator, "creator"))
         return 0 if ids is None else len(ids)
 
     @gl.public.view

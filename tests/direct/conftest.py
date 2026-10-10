@@ -20,6 +20,7 @@ import json
 import re
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -141,6 +142,55 @@ def warp_by(direct_vm, contract, delta_seconds: int) -> int:
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def sdk_on_path():
+    """
+    Put the pinned GenVM SDK on ``sys.path`` before any fixture needs it.
+
+    ``gltest`` normally adds it as a side effect of deploying, which leaves
+    ``create_address`` returning raw bytes or ``Address`` instances depending on
+    whether some earlier test in the session happened to deploy first. Doing it
+    up front makes the address fixtures deterministic.
+    """
+    from gltest.direct.sdk_loader import setup_sdk_paths
+
+    setup_sdk_paths(Path(CONTRACT).resolve())
+
+
+def _as_address(value):
+    """Normalise a test address to an ``Address`` instance."""
+    from genlayer.py.types import Address
+
+    if isinstance(value, Address):
+        return value
+    return Address(bytes(value))
+
+
+def _address_fixture(seed):
+    """An address fixture that is always an ``Address``, never raw bytes."""
+
+    @pytest.fixture
+    def fixture(sdk_on_path):
+        from gltest.direct.loader import create_address
+
+        return _as_address(create_address(seed))
+
+    return fixture
+
+
+direct_owner = _address_fixture("default_sender")
+direct_alice = _address_fixture("alice")
+direct_bob = _address_fixture("bob")
+direct_charlie = _address_fixture("charlie")
+
+
+@pytest.fixture
+def zero_address(sdk_on_path):
+    from genlayer.py.types import Address
+
+    return Address(bytes(20))
 
 
 @pytest.fixture
