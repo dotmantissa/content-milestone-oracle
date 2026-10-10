@@ -19,6 +19,7 @@ genuine coverage of the equivalence principle, not a stand-in for it.
 import json
 import re
 import sys
+from datetime import datetime, timezone
 
 import pytest
 
@@ -115,6 +116,26 @@ def set_scene(direct_vm, url: str, page: str, value, **kwargs) -> None:
     direct_vm.clear_mocks()
     mock_page(direct_vm, url, page)
     mock_reader(direct_vm, value, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Time control
+#
+# ``direct_vm.warp`` repoints the clock the contract reads, which is how the
+# deadline, cancellation window, defer window and resolution grace window are
+# all exercised without waiting.
+# ---------------------------------------------------------------------------
+
+
+def warp_to(direct_vm, unix_seconds: int) -> None:
+    moment = datetime.fromtimestamp(int(unix_seconds), tz=timezone.utc)
+    direct_vm.warp(moment.isoformat().replace("+00:00", "Z"))
+
+
+def warp_by(direct_vm, contract, delta_seconds: int) -> int:
+    target = contract.now_ts() + int(delta_seconds)
+    warp_to(direct_vm, target)
+    return target
 
 
 # ---------------------------------------------------------------------------

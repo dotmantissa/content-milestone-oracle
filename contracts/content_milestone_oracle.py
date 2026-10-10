@@ -23,23 +23,29 @@ platforms aggregate asynchronously, and the number is still climbing while the
 round runs. A single trusted reader would have to be believed; a strict-equality
 equivalence principle would deadlock on every ordinary discrepancy.
 
-This contract therefore applies a two-gate equivalence principle:
+This contract therefore applies a three-gate equivalence principle:
 
-  1. Raw proximity. Each side's reading may deviate from the unobservable truth
+  1. Self classification. The leader's zone is recomputed from the leader's own
+     reading, so a leader cannot report one number and label it as another.
+
+  2. Raw proximity. Each side's reading may deviate from the unobservable truth
      by at most one variance allowance, so two honest readings may differ by at
-     most two allowances. Anything wider is treated as disagreement.
+     most two. This protects the number that gets recorded on chain.
 
-  2. Zone agreement. Each reading is classified into one of three zones against
-     a tolerance band straddling the threshold: ``pass`` above the band,
-     ``fail`` below it, ``borderline`` inside it. Validators must land in the
-     same zone. Settlement is a function of the zone, never of the raw number,
-     so a reading that cannot be distinguished from the threshold can never
-     settle on one validator's lucky sample.
+  3. Zone reachability. Each reading is classified into one of three zones
+     against a tolerance band straddling the threshold: ``pass`` above the band,
+     ``fail`` below it, ``borderline`` inside it. The leader's conclusion must
+     be supportable from the validator's own reading widened by the validator's
+     own allowance. This protects the settlement: agreeing that a threshold was
+     cleared because the leader said so and happened to be nearby is not
+     verification.
 
-Borderline readings do not fail and do not pay. They are deferred: the contract
-waits (six hours by default) and re-reads. Engagement metrics are monotonic, so
-a genuinely borderline case resolves itself upward with time; a stalled one runs
-out the sponsor's deadline and refunds.
+Settlement reads the zone, never the raw number, so a reading that cannot be
+distinguished from the threshold can never settle on one validator's lucky
+sample. Borderline readings do not fail and do not pay. They are deferred: the
+contract waits (six hours by default) and re-reads. Engagement metrics are
+monotonic, so a genuinely borderline case resolves itself upward with time; a
+stalled one runs out the sponsor's deadline and refunds.
 
 Anti-hallucination
 ------------------
@@ -179,7 +185,7 @@ _GROUPING_SPACES = ("\xa0", "\u202f", "\u2009", " ")
 _TOKEN_RE = re.compile(r"\d[\d.,\xa0\u202f\u2009 ]*\d|\d")
 _SUFFIX_RE = re.compile(r"\s{0,2}([KkMmBb])(?![A-Za-z])")
 _WAIT_RE = re.compile(r"^\d{1,5}(ms|s)$")
-_SEGMENT_RE = re.compile(r"[.,]")
+_SEGMENT_RE = re.compile(r"[.,\s]+")
 _WHITESPACE_RE = re.compile(r"\s+")  # `\s` already covers the Unicode spaces
 _JSON_TRAILING_COMMA_RE = re.compile(r",(?=\s*[}\]])")
 _KEY_RE = re.compile(r"^[a-z0-9_]{2,32}$")
@@ -365,19 +371,24 @@ def _squash_whitespace(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", text)
 
 
+def _strip_group_spaces(token: str) -> str:
+    cleaned = str(token)
+    for ch in _GROUPING_SPACES:
+        cleaned = cleaned.replace(ch, "")
+    return cleaned
+
+
 def _interpret_number(token: str, mult: int) -> list[int]:
     """
     Every plausible integer reading of one numeric token from a page.
 
-    ``.`` and ``,`` are ambiguous across locales, so both the grouping reading
-    and the decimal reading are produced, along with each individual digit run.
-    Over-generating is safe: the scanner's only job is to bound what the model
-    is allowed to claim it saw, and every value produced here is literally on
-    the page.
+    ``.`` and ``,`` are ambiguous across locales, and squashed whitespace can
+    join two separate numbers into one token, so this produces the grouping
+    reading, the decimal reading, and each individual digit run. Over-generating
+    is safe: the scanner's only job is to bound what the model may claim it saw,
+    and every value produced here is literally printed on the page.
     """
-    cleaned = token
-    for ch in _GROUPING_SPACES:
-        cleaned = cleaned.replace(ch, "")
+    cleaned = _strip_group_spaces(token)
     if not cleaned or not cleaned[0].isdigit():
         return []
 
@@ -397,11 +408,43 @@ def _interpret_number(token: str, mult: int) -> list[int]:
             scale = 10 ** len(frac)
             out.append((int(head + frac) * mult) // scale)
             out.append(int(head) * mult)
-        for seg in _SEGMENT_RE.split(cleaned):
-            if seg.isdigit() and len(seg) <= 18:
-                out.append(int(seg))
+
+    for segment in _SEGMENT_RE.split(str(token)):
+        if segment.isdigit() and len(segment) <= 18:
+            out.append(int(segment))
 
     return out
+
+
+def _expand_abbreviated(token: str, mult: int) -> typing.Optional[int]:
+    """
+    The single intended reading of a count the model reported back.
+
+    Unlike :func:`_interpret_number`, which enumerates possibilities for the
+    scanner, this commits to one answer: without a magnitude suffix every
+    separator is digit grouping, and with one the last separator is a decimal
+    point. ``12.4K`` is 12400, ``12,431`` is 12431.
+    """
+    cleaned = _strip_group_spaces(token)
+    if not cleaned or not cleaned[0].isdigit():
+        return None
+    digits_only = cleaned.replace(",", "").replace(".", "")
+    if not digits_only.isdigit() or len(digits_only) > 18:
+        return None
+    if mult == 1:
+        return int(digits_only)
+
+    comma_at = cleaned.rfind(",")
+    dot_at = cleaned.rfind(".")
+    cut = comma_at if comma_at > dot_at else dot_at
+    if cut <= 0:
+        return int(digits_only) * mult
+
+    head = cleaned[:cut].replace(",", "").replace(".", "")
+    frac = cleaned[cut + 1 :].replace(",", "").replace(".", "")
+    if not head.isdigit() or not frac.isdigit() or not 0 < len(frac) <= 6:
+        return None
+    return (int(head + frac) * mult) // (10 ** len(frac))
 
 
 def _numeric_candidates(text: str, cap: int = _MAX_CANDIDATES) -> list[int]:
@@ -552,10 +595,10 @@ def _coerce_count(raw: typing.Any) -> int:
         if token[-1] in "kKmMbB":
             mult = _SUFFIX_MULT[token[-1].lower()]
             token = token[:-1].strip()
-        readings = _interpret_number(token, mult)
-        if not readings:
+        expanded = _expand_abbreviated(token, mult)
+        if expanded is None:
             raise gl.vm.UserError(f"{ERROR_LLM} `value` was not numeric")
-        value = max(readings) if mult != 1 else readings[0]
+        value = expanded
     if value < 0:
         raise gl.vm.UserError(f"{ERROR_LLM} `value` was negative")
     if value > _MAX_METRIC_VALUE:
@@ -593,19 +636,27 @@ def _agreement_report(
     """
     The equivalence principle, as a transparent record rather than a bare bool.
 
-    Both gates must pass:
+    Three gates, each protecting something different.
 
-      ``raw_proximity``  Each honest reading may sit one variance allowance from
-                         the truth, so two honest readings may differ by two.
-      ``zone_agreement`` The leader's zone must be reachable from this
-                         validator's own reading widened by that same combined
-                         allowance. Because :func:`_classify` is monotonic this
-                         follows from raw proximity, and it is asserted rather
-                         than assumed so that the binary achieved / not achieved
-                         conclusion is never taken on the leader's word.
+    ``self_classification``
+        The leader's zone is recomputed from the leader's own value. A leader
+        cannot report one reading and label it as another.
 
-    The leader's self-reported zone is also recomputed from its own value, so a
-    leader cannot report a reading of one zone while labelling it another.
+    ``raw_proximity``
+        The two readings must be mutually consistent. Each honest reading may
+        sit one variance allowance from the unobservable true count, so two
+        honest readings may differ by two allowances. This gate protects the
+        *number that gets recorded*: without it a leader inside the right zone
+        could still write an inflated count into the milestone's evidence.
+
+    ``zone_reachability``
+        The leader's conclusion must be supportable from this validator's own
+        reading, widened by this validator's own allowance. This gate protects
+        the *settlement*: agreeing that a threshold was cleared because the
+        leader said so and happened to be nearby is not verification. Note the
+        single allowance here, not the combined one. Softness near the
+        threshold is the tolerance band's job, and the band answers it by
+        deferring rather than by lowering the bar for agreement.
     """
     report: dict = {
         "agree": False,
@@ -614,7 +665,8 @@ def _agreement_report(
         "validator_value": int(mine.get("value", 0)),
         "leader_zone": "",
         "validator_zone": str(mine.get("zone", "")),
-        "allowance": 0,
+        "combined_allowance": 0,
+        "validator_allowance": 0,
         "gap": 0,
         "span_low_zone": "",
         "span_high_zone": "",
@@ -671,40 +723,39 @@ def _agreement_report(
         )
         return report
 
-    allowance = _variance_allowance(
-        leader_value, variance_bps, variance_floor
-    ) + _variance_allowance(mine_value, variance_bps, variance_floor)
+    leader_allowance = _variance_allowance(leader_value, variance_bps, variance_floor)
+    mine_allowance = _variance_allowance(mine_value, variance_bps, variance_floor)
+    combined = leader_allowance + mine_allowance
     gap = abs(leader_value - mine_value)
-    report["allowance"] = allowance
+    report["combined_allowance"] = combined
+    report["validator_allowance"] = mine_allowance
     report["gap"] = gap
 
-    if gap > allowance:
+    if gap > combined:
         report["reason"] = (
-            f"readings differ by {gap}, beyond the combined variance allowance of {allowance}"
+            f"readings differ by {gap}, beyond the combined variance allowance of {combined}"
         )
         return report
 
-    low = mine_value - allowance
+    low = mine_value - mine_allowance
     if low < 0:
         low = 0
     span_low = _classify(low, threshold, band_bps)
-    span_high = _classify(mine_value + allowance, threshold, band_bps)
+    span_high = _classify(mine_value + mine_allowance, threshold, band_bps)
     report["span_low_zone"] = span_low
     report["span_high_zone"] = span_high
 
-    if not (
-        _ZONE_RANK[span_low] <= _ZONE_RANK[leader_zone] <= _ZONE_RANK[span_high]
-    ):
+    if not (_ZONE_RANK[span_low] <= _ZONE_RANK[leader_zone] <= _ZONE_RANK[span_high]):
         report["reason"] = (
-            f"leader zone `{leader_zone}` is outside the validator's reachable "
-            f"range `{span_low}`..`{span_high}`"
+            f"leader concluded `{leader_zone}` but this validator's reading of "
+            f"{mine_value} only supports `{span_low}`..`{span_high}`"
         )
         return report
 
     report["agree"] = True
     report["reason"] = (
-        f"readings {leader_value} and {mine_value} differ by {gap} within {allowance} "
-        f"and both conclude `{leader_zone}`"
+        f"readings {leader_value} and {mine_value} differ by {gap} within {combined}, "
+        f"and `{leader_zone}` is supportable from {mine_value}"
     )
     return report
 
