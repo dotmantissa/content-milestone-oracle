@@ -731,11 +731,14 @@ if not preview["agree"]:
 ```bash
 pip install -r requirements.txt
 genvm-lint check contracts/content_milestone_oracle.py
-pytest tests/direct -q
+pytest -p no:gltest tests/direct -q
 ```
 
-389 tests in about 17 seconds. Every one of the contract's 43 public methods is
-exercised. Coverage is organised as:
+The fixtures explicitly load the SDK from [GenVM v0.2.16](https://github.com/genlayerlabs/genvm/releases/tag/v0.2.16),
+which contains the pinned runner and its dependencies. A fresh install downloads
+that release; it does not follow the latest prerelease. With the SDK cached,
+389 tests run in about 17 seconds. Every one of the contract's 43 public methods
+is exercised. Coverage is organised as:
 
 | File | Covers |
 |---|---|

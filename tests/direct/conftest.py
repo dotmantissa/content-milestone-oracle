@@ -26,6 +26,9 @@ import pytest
 
 CONTRACT = "contracts/content_milestone_oracle.py"
 CONTRACT_MODULE = "_contract_content_milestone_oracle"
+# This release contains the contract's pinned runner and SDK dependencies.
+# Newer prereleases may use a different asset layout than genlayer-test 0.29.2.
+GENVM_RELEASE = "v0.2.16"
 
 GEN = 10**18
 DAY = 86400
@@ -156,7 +159,7 @@ def sdk_on_path():
     """
     from gltest.direct.sdk_loader import setup_sdk_paths
 
-    setup_sdk_paths(Path(CONTRACT).resolve())
+    setup_sdk_paths(Path(CONTRACT).resolve(), version=GENVM_RELEASE)
 
 
 def _as_address(value):
@@ -201,7 +204,7 @@ def deploy_oracle(direct_vm, direct_deploy, direct_owner):
         args = dict(DEFAULT_CTOR)
         args.update(overrides)
         direct_vm.sender = direct_owner
-        contract = direct_deploy(CONTRACT, *args.values())
+        contract = direct_deploy(CONTRACT, *args.values(), sdk_version=GENVM_RELEASE)
         # Direct mode does not credit the contract for payable calls, so seed a
         # generous balance to keep the solvency views meaningful.
         direct_vm.deal(direct_vm._contract_address, 10_000 * GEN)
