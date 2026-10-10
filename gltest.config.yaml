@@ -11,8 +11,8 @@ networks:
     leader_only: false
 
   studionet:
-    # studio.genlayer.com. Gasless, so a zero balance is fine, but rate limited
-    # to 60 requests a minute. Integration runs here are paced accordingly.
+    # studio.genlayer.com. Wallet transactions are gasless; escrow tests still
+    # need a funded sponsor. Runs are paced for the 60 requests/minute limit.
     leader_only: false
 
   # To run the suite against Testnet Bradbury, uncomment this block and export

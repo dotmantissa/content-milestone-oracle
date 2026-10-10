@@ -1067,6 +1067,11 @@ class Milestone:
     fee_atto: u256
     evidence: str
     memo: str
+    # Snapshot timing terms at creation. Owner updates only change defaults.
+    defer_seconds: u256
+    max_defer_rounds: u256
+    resolution_grace_seconds: u256
+    cancel_window_seconds: u256
 
 
 # ---------------------------------------------------------------------------
@@ -1366,15 +1371,10 @@ class ContentMilestoneOracle(gl.Contract):
         are serialised, so the spec must be built here and carry no references
         back into contract state.
         """
-        platform = self.platforms.get(str(milestone.platform_key))
-        if platform is None:
-            raise gl.vm.UserError(
-                f"{ERROR_EXPECTED} platform `{milestone.platform_key}` is no longer registered"
-            )
-        if not bool(platform.enabled):
-            raise gl.vm.UserError(
-                f"{ERROR_EXPECTED} platform `{milestone.platform_key}` is disabled"
-            )
+        reason = self._platform_unavailable_reason(milestone)
+        if reason:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} {reason}")
+        platform = self.platforms[str(milestone.platform_key)]
         return {
             "url": str(milestone.content_url),
             "metric": str(milestone.metric),
@@ -1386,6 +1386,14 @@ class ContentMilestoneOracle(gl.Contract):
             "variance_bps": int(milestone.variance_bps),
             "variance_floor": int(milestone.variance_floor),
         }
+
+    def _platform_unavailable_reason(self, milestone: Milestone) -> str:
+        platform = self.platforms.get(str(milestone.platform_key))
+        if platform is None:
+            return f"platform `{milestone.platform_key}` is no longer registered"
+        if not bool(platform.enabled):
+            return f"platform `{milestone.platform_key}` is disabled"
+        return ""
 
     def _record_evidence(
         self, milestone: Milestone, observation: dict, now: int, round_index: int
@@ -1464,7 +1472,7 @@ class ContentMilestoneOracle(gl.Contract):
         return {"status": STATUS_REFUNDED, "refunded_atto": gross, "reason": reason}
 
     def _resolution_deadline(self, milestone: Milestone) -> int:
-        return int(milestone.deadline_ts) + int(self.resolution_grace_seconds)
+        return int(milestone.deadline_ts) + int(milestone.resolution_grace_seconds)
 
     def _apply_observation(
         self, milestone: Milestone, observation: dict, now: int
@@ -1516,8 +1524,8 @@ class ContentMilestoneOracle(gl.Contract):
         if zone == ZONE_BORDERLINE:
             rounds = int(milestone.defer_rounds) + 1
             milestone.defer_rounds = u256(rounds)
-            milestone.deferred_until = u256(now + int(self.defer_seconds))
-            if rounds >= int(self.max_defer_rounds):
+            milestone.deferred_until = u256(now + int(milestone.defer_seconds))
+            if rounds >= int(milestone.max_defer_rounds):
                 self._set_status(milestone, STATUS_CONTESTED)
                 MilestoneContested(
                     milestone_id,
@@ -1599,8 +1607,8 @@ class ContentMilestoneOracle(gl.Contract):
         """
         Update the defaults applied to newly created milestones.
 
-        Milestones already created keep the band and variance they were created
-        with, so a sponsor's terms cannot be changed under them.
+        Existing milestones keep their band, variance, re-check interval,
+        contested-round limit and resolution grace period.
         """
         self._require_owner()
         self._assign_consensus_params(
@@ -1952,6 +1960,10 @@ class ContentMilestoneOracle(gl.Contract):
             fee_atto=u256(0),
             evidence="",
             memo=_clip(memo, _MAX_MEMO_LEN),
+            defer_seconds=u256(int(self.defer_seconds)),
+            max_defer_rounds=u256(int(self.max_defer_rounds)),
+            resolution_grace_seconds=u256(int(self.resolution_grace_seconds)),
+            cancel_window_seconds=u256(int(self.cancel_window_seconds)),
         )
         self._set_status(self.milestones[milestone_id], STATUS_OPEN)
 
@@ -2041,7 +2053,7 @@ class ContentMilestoneOracle(gl.Contract):
                 f"{ERROR_EXPECTED} milestone has been adjudicated and can no longer be cancelled"
             )
         now = _now_ts()
-        window_ends = int(milestone.created_at) + int(self.cancel_window_seconds)
+        window_ends = int(milestone.created_at) + int(milestone.cancel_window_seconds)
         if now > window_ends:
             raise gl.vm.UserError(
                 f"{ERROR_EXPECTED} the cancellation window closed at {window_ends}"
@@ -2169,14 +2181,14 @@ class ContentMilestoneOracle(gl.Contract):
                 f"{ERROR_EXPECTED} `{milestone_id}` is {status}, nothing is deferred"
             )
         now = _now_ts()
-        if now < int(milestone.deferred_until):
-            raise gl.vm.UserError(
-                f"{ERROR_EXPECTED} re-check unlocks at {int(milestone.deferred_until)}"
-            )
         limit = self._resolution_deadline(milestone)
         if now > limit:
             raise gl.vm.UserError(
                 f"{ERROR_EXPECTED} the resolution window closed at {limit}; call refund"
+            )
+        if now < int(milestone.deferred_until):
+            raise gl.vm.UserError(
+                f"{ERROR_EXPECTED} re-check unlocks at {int(milestone.deferred_until)}"
             )
 
         spec = self._spec_for(milestone)
@@ -2188,7 +2200,7 @@ class ContentMilestoneOracle(gl.Contract):
             milestone.attempts = u256(int(milestone.attempts) + 1)
             milestone.observed_value = u256(int(observation.get("value", 0)))
             milestone.observed_at = u256(now)
-            milestone.deferred_until = u256(now + int(self.defer_seconds))
+            milestone.deferred_until = u256(now + int(milestone.defer_seconds))
             self._record_evidence(milestone, observation, now, int(milestone.attempts))
             ObservationRecorded(
                 str(milestone_id),
@@ -2322,9 +2334,13 @@ class ContentMilestoneOracle(gl.Contract):
             "fee_atto": int(milestone.fee_atto),
             "evidence": str(milestone.evidence),
             "memo": str(milestone.memo),
+            "defer_seconds": int(milestone.defer_seconds),
+            "max_defer_rounds": int(milestone.max_defer_rounds),
+            "resolution_grace_seconds": int(milestone.resolution_grace_seconds),
+            "cancel_window_seconds": int(milestone.cancel_window_seconds),
             "decision_lines": _decision_lines(threshold, band_bps),
             "cancel_window_ends": int(milestone.created_at)
-            + int(self.cancel_window_seconds),
+            + int(milestone.cancel_window_seconds),
             "resolution_deadline": self._resolution_deadline(milestone),
         }
 
@@ -2481,6 +2497,13 @@ class ContentMilestoneOracle(gl.Contract):
         if platform is None:
             return {"ok": False, "host": host, "reason": "unknown platform"}
         allow = _split_csv(str(platform.hosts))
+        if not str(content_url).strip() or len(str(content_url).strip()) > _MAX_URL_LEN:
+            return {
+                "ok": False,
+                "host": host,
+                "reason": f"content_url must be 1-{_MAX_URL_LEN} chars",
+                "allowed_hosts": allow,
+            }
         if not host:
             return {
                 "ok": False,
@@ -2496,7 +2519,11 @@ class ContentMilestoneOracle(gl.Contract):
             "host_allowed": allowed,
             "platform_enabled": bool(platform.enabled),
             "fetch_mode": str(platform.fetch_mode),
-            "reason": "" if allowed else f"host `{host}` is not covered by this platform",
+            "reason": (
+                f"host `{host}` is not covered by this platform" if not allowed
+                else f"platform `{platform.key}` is disabled" if not bool(platform.enabled)
+                else ""
+            ),
         }
 
     @gl.public.view
@@ -2577,6 +2604,9 @@ class ContentMilestoneOracle(gl.Contract):
                 "status": status,
                 "deadline_ts": int(milestone.deadline_ts),
             }
+        reason = self._platform_unavailable_reason(milestone)
+        if reason:
+            return {"claimable": False, "reason": reason, "status": status}
         return {
             "claimable": True,
             "reason": "",
@@ -2602,19 +2632,28 @@ class ContentMilestoneOracle(gl.Contract):
             }
         unlock = int(milestone.deferred_until)
         limit = self._resolution_deadline(milestone)
+        if now > limit:
+            return {
+                "resolvable": False,
+                "reason": "resolution window closed, call refund",
+                "status": status,
+                "resolution_deadline": limit,
+            }
+        reason = "contract is paused" if self.paused else self._platform_unavailable_reason(milestone)
+        if reason:
+            return {
+                "resolvable": False,
+                "reason": reason,
+                "status": status,
+                "recheck_after": unlock,
+                "resolution_deadline": limit,
+            }
         if now < unlock:
             return {
                 "resolvable": False,
                 "reason": "re-check window has not opened",
                 "status": status,
                 "recheck_after": unlock,
-                "resolution_deadline": limit,
-            }
-        if now > limit:
-            return {
-                "resolvable": False,
-                "reason": "resolution window closed, call refund",
-                "status": status,
                 "resolution_deadline": limit,
             }
         return {

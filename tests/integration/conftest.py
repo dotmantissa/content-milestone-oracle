@@ -21,12 +21,18 @@ Notes on running these:
     data.
 """
 
+import json
 import os
+import re
 import time
+from pathlib import Path
 
 import pytest
 from gltest import get_contract_factory
 from gltest.assertions import tx_execution_succeeded
+from gltest.clients import get_gl_client
+from gltest.utils import extract_contract_address
+from genlayer_py.types import TransactionStatus
 
 CONTRACT_NAME = "ContentMilestoneOracle"
 
@@ -38,7 +44,7 @@ DAY = 86_400
 SIX_HOURS = 21_600
 GEN = 10**18
 
-# Studio deployments are gasless, so escrow amounts here are nominal.
+# Gasless transaction execution still requires a funded sponsor for escrow.
 REWARD = 10**15
 
 # Constructor arguments used by every test module. A one minute cancellation
@@ -122,17 +128,21 @@ def deployer_account():
 
 
 @pytest.fixture(scope="module")
-def oracle():
+def oracle(gl_client):
     """One deployment shared by the module, to stay inside the rate limit."""
     factory = get_contract_factory(CONTRACT_NAME)
     account = deployer_account()
 
-    def deploy():
-        if account is not None:
-            return factory.deploy(args=CTOR, account=account)
-        return factory.deploy(args=CTOR)
-
-    contract = retry_rpc(deploy)
+    # Submit exactly once and save the ID before waiting. Receipt polling is
+    # read-only and can retry safely; an ambiguous submission cannot.
+    tx_id = gl_client.deploy_contract(code=factory.contract_code, args=CTOR, account=account)
+    checkpoint("deploy", tx_id)
+    receipt = wait_receipt(tx_id)
+    assert tx_execution_succeeded(receipt), leader_return(receipt)
+    assert_consensus(receipt)
+    address = extract_contract_address(receipt)
+    checkpoint("deploy", tx_id, receipt=receipt, address=address)
+    contract = factory.build_contract(contract_address=address, account=account)
     print(f"\ndeployed {CONTRACT_NAME} at {contract.address}")
     return contract
 
@@ -144,6 +154,81 @@ def read(bound_call):
 
 def now_ts(oracle) -> int:
     return int(read(oracle.now_ts(args=[])))
+
+
+def checkpoint(operation, tx_id, *, receipt=None, address=None):
+    """Keep non-secret transaction recovery metadata in ignored artifacts."""
+    path = Path("artifacts/live-run.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    state = json.loads(path.read_text()) if path.exists() else []
+    entry = {"operation": operation, "transaction_id": str(tx_id), "at": int(time.time())}
+    if address is not None:
+        entry["address"] = address
+    if receipt is not None:
+        entry["execution_succeeded"] = tx_execution_succeeded(receipt)
+        entry["votes"] = receipt.get("consensus_data", {}).get("votes", {})
+    state.append(entry)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(state, indent=2))
+    temporary.replace(path)
+    print(f"\n{operation}: {tx_id}", flush=True)
+
+
+def wait_receipt(tx_id, *, settle=False):
+    client = get_gl_client()
+    receipt = retry_rpc(lambda: client.wait_for_transaction_receipt(
+        transaction_hash=tx_id,
+        status=TransactionStatus.FINALIZED if settle else TransactionStatus.ACCEPTED,
+        interval=6_000,
+        retries=60,
+    ))
+    if settle:
+        for child in receipt.get("triggered_transactions", []):
+            child_receipt = retry_rpc(lambda: client.wait_for_transaction_receipt(
+                transaction_hash=child, status=TransactionStatus.FINALIZED, interval=6_000, retries=60
+            ))
+            if child_receipt.get("consensus_data") is not None:
+                assert tx_execution_succeeded(child_receipt), child_receipt
+            else:
+                # Studio native transfers have no GenVM consensus receipt.
+                # Verify the native value credit separately; the
+                # caller also checks the beneficiary's actual balance delta.
+                assert child_receipt.get("type") == 0, child_receipt
+                assert child_receipt.get("value_credited") is True, child_receipt
+    return receipt
+
+
+def transact(oracle, method, args, *, value=0, settle=False):
+    """Send once, checkpoint, then safely poll the same transaction ID."""
+    tx_id = get_gl_client().write_contract(
+        address=oracle.address, function_name=method, args=args,
+        account=oracle.account, value=value,
+    )
+    checkpoint(method, tx_id)
+    receipt = wait_receipt(tx_id, settle=settle)
+    checkpoint(method, tx_id, receipt=receipt)
+    assert_consensus(receipt)
+    return receipt
+
+
+def assert_consensus(receipt):
+    """Missing votes must not silently pass as validator agreement."""
+    votes = receipt.get("consensus_data", {}).get("votes", {})
+    assert votes, "no validator votes recorded; run with leader_only: false"
+    assert "disagree" not in votes.values(), votes
+    assert "agree" in votes.values(), votes
+    return votes
+
+
+def wait_until(oracle, timestamp, *, timeout=180):
+    """Wait against the contract clock with bounded, short polling sleeps."""
+    stop = time.monotonic() + timeout
+    while True:
+        remaining = timestamp - now_ts(oracle)
+        if remaining <= 0:
+            return
+        assert time.monotonic() < stop, f"contract clock did not reach {timestamp}"
+        time.sleep(min(remaining, 10))
 
 
 def create_milestone(
@@ -163,8 +248,7 @@ def create_milestone(
 ):
     """Create a milestone on chain and return its id."""
     deadline = now_ts(oracle) + deadline_in
-    receipt = oracle.create_milestone(
-        args=[
+    receipt = transact(oracle, "create_milestone", [
             creator,
             url,
             platform,
@@ -175,15 +259,22 @@ def create_milestone(
             band_bps,
             variance_bps,
             variance_floor,
-        ]
-    ).transact(value=reward)
+        ], value=reward)
     assert tx_execution_succeeded(receipt), receipt
     pace()
-    # The id is sequential, so the newest milestone is the last one indexed.
-    count = int(read(oracle.milestone_count(args=[])))
-    return f"m{count}"
+    # The receipt identifies this call even if another sponsor creates a
+    # milestone between acceptance and the next view call.
+    returned = leader_return(receipt)
+    assert isinstance(returned, str), returned
+    match = re.fullmatch(r'"?(m[1-9][0-9]*)"?', returned)
+    assert match, f"creation did not return a milestone ID: {returned}"
+    return match.group(1)
 
 
 def leader_return(receipt):
     """The value the contract returned, as recorded in the leader receipt."""
-    return receipt["consensus_data"]["leader_receipt"][0].get("result")
+    result = receipt["consensus_data"]["leader_receipt"][0].get("result")
+    if isinstance(result, dict) and "payload" in result:
+        payload = result["payload"]
+        return payload.get("readable") if isinstance(payload, dict) else payload
+    return result

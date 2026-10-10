@@ -1,0 +1,22 @@
+name: Contract checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  direct:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - run: genvm-lint check contracts/content_milestone_oracle.py
+      - run: pytest tests/direct -q
+      - run: pytest -p no:gltest -p no:gltest_direct tests/harness -q

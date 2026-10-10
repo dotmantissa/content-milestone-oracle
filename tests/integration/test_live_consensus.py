@@ -14,9 +14,9 @@ import time
 
 import pytest
 from gltest.assertions import tx_execution_succeeded
-from genlayer_py.types import TransactionStatus
 
 from conftest import (
+    CTOR,
     DAY,
     GITHUB_URL,
     REWARD,
@@ -25,6 +25,8 @@ from conftest import (
     now_ts,
     pace,
     read,
+    transact,
+    wait_until,
 )
 
 
@@ -92,10 +94,7 @@ def live_reading(oracle, as_creator, creator, gl_client):
     before = gl_client.get_balance(creator.address)
     pace()
 
-    receipt = as_creator.submit_claim(args=[milestone]).transact(
-        wait_transaction_status=TransactionStatus.FINALIZED,
-        wait_triggered_transactions=True,
-    )
+    receipt = transact(as_creator, "submit_claim", [milestone], settle=True)
     assert tx_execution_succeeded(receipt), leader_return(receipt)
 
     result = read(oracle.get_milestone(args=[milestone]))
@@ -171,7 +170,7 @@ def test_a_clear_fail_leaves_the_milestone_claimable(oracle, as_creator, creator
     milestone = create_milestone(oracle, creator.address, threshold=900_000_000)
     pace()
 
-    receipt = as_creator.submit_claim(args=[milestone]).transact()
+    receipt = transact(as_creator, "submit_claim", [milestone])
     assert tx_execution_succeeded(receipt), leader_return(receipt)
 
     record = read(oracle.get_milestone(args=[milestone]))
@@ -206,7 +205,7 @@ def test_a_borderline_reading_defers_rather_than_settling(
     assert lines["certain_fail_below"] < live_reading["value"] < lines["certain_pass_at"]
     pace()
 
-    receipt = as_creator.submit_claim(args=[milestone]).transact()
+    receipt = transact(as_creator, "submit_claim", [milestone])
     assert tx_execution_succeeded(receipt), leader_return(receipt)
 
     record = read(oracle.get_milestone(args=[milestone]))
@@ -232,7 +231,7 @@ def test_a_recheck_before_its_window_is_refused(oracle, as_creator, creator, liv
         oracle, creator.address, threshold=live_reading["value"], deadline_in=6 * DAY
     )
     pace()
-    receipt = as_creator.submit_claim(args=[milestone]).transact()
+    receipt = transact(as_creator, "submit_claim", [milestone])
     assert tx_execution_succeeded(receipt), leader_return(receipt)
     assert read(oracle.get_milestone(args=[milestone]))["status"] == "deferred"
 
@@ -241,7 +240,7 @@ def test_a_recheck_before_its_window_is_refused(oracle, as_creator, creator, liv
     assert status["reason"] == "re-check window has not opened"
 
     pace()
-    receipt = as_creator.resolve_deferred(args=[milestone]).transact()
+    receipt = transact(as_creator, "resolve_deferred", [milestone])
     assert not tx_execution_succeeded(receipt)
     assert "[EXPECTED] re-check unlocks at" in str(leader_return(receipt))
     pace()
@@ -258,16 +257,13 @@ def test_a_sponsor_can_concede_a_borderline_claim(
         oracle, creator.address, threshold=live_reading["value"], deadline_in=5 * DAY
     )
     pace()
-    receipt = as_creator.submit_claim(args=[milestone]).transact()
+    receipt = transact(as_creator, "submit_claim", [milestone])
     assert tx_execution_succeeded(receipt), leader_return(receipt)
     assert read(oracle.get_milestone(args=[milestone]))["status"] == "deferred"
 
     before = gl_client.get_balance(creator.address)
     pace()
-    receipt = oracle.concede(args=[milestone]).transact(
-        wait_transaction_status=TransactionStatus.FINALIZED,
-        wait_triggered_transactions=True,
-    )
+    receipt = transact(oracle, "concede", [milestone], settle=True)
     assert tx_execution_succeeded(receipt), leader_return(receipt)
 
     record = read(oracle.get_milestone(args=[milestone]))
@@ -291,7 +287,7 @@ def test_the_access_guards_reach_consensus(oracle, creator, accounts):
     pace()
 
     # The sponsor is not the creator, so the sponsor cannot claim.
-    receipt = oracle.submit_claim(args=[milestone]).transact()
+    receipt = transact(oracle, "submit_claim", [milestone])
     assert not tx_execution_succeeded(receipt)
     assert "[EXPECTED] creator only" in str(leader_return(receipt))
     votes = receipt["consensus_data"].get("votes", {})
@@ -300,14 +296,14 @@ def test_the_access_guards_reach_consensus(oracle, creator, accounts):
 
     # A third party is neither.
     stranger = oracle.connect(accounts[2])
-    receipt = stranger.withdraw_claim(args=[milestone]).transact()
+    receipt = transact(stranger, "withdraw_claim", [milestone])
     assert not tx_execution_succeeded(receipt)
     assert "[EXPECTED] creator only" in str(leader_return(receipt))
     pace()
 
 
 def test_an_unknown_milestone_is_rejected_identically_everywhere(oracle):
-    receipt = oracle.submit_claim(args=["does-not-exist"]).transact()
+    receipt = transact(oracle, "submit_claim", ["does-not-exist"])
     assert not tx_execution_succeeded(receipt)
     assert "[EXPECTED] unknown milestone `does-not-exist`" in str(leader_return(receipt))
     pace()
@@ -315,8 +311,7 @@ def test_an_unknown_milestone_is_rejected_identically_everywhere(oracle):
 
 def test_a_url_outside_the_platform_host_list_is_rejected(oracle, creator):
     deadline = now_ts(oracle) + 3 * DAY
-    receipt = oracle.create_milestone(
-        args=[
+    receipt = transact(oracle, "create_milestone", [
             creator.address,
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
             "github",
@@ -327,8 +322,7 @@ def test_a_url_outside_the_platform_host_list_is_rejected(oracle, creator):
             0,
             0,
             0,
-        ]
-    ).transact(value=REWARD)
+        ], value=REWARD)
     assert not tx_execution_succeeded(receipt)
     assert "is not covered by platform `github`" in str(leader_return(receipt))
     pace()
@@ -375,6 +369,45 @@ def test_the_failure_comparator_is_inspectable_on_chain(oracle):
 # ---------------------------------------------------------------------------
 
 
+def test_a_permissionless_recheck_uses_the_milestones_original_terms(
+    oracle, as_creator, creator, live_reading, accounts
+):
+    """Real re-check consensus, with a short test interval pinned at creation."""
+    previous = read(oracle.get_milestone(args=[live_reading["milestone"]]))
+    changed = transact(oracle, "set_consensus_params", [100, 50, 5, 60, 2, DAY])
+    assert tx_execution_succeeded(changed), leader_return(changed)
+    try:
+        milestone = create_milestone(
+            oracle, creator.address, threshold=live_reading["value"], deadline_in=DAY
+        )
+        fresh = read(oracle.get_milestone(args=[milestone]))
+        assert fresh["defer_seconds"] == 60
+        assert fresh["max_defer_rounds"] == 2
+        assert fresh["resolution_deadline"] == fresh["deadline_ts"] + DAY
+        assert read(oracle.get_milestone(args=[live_reading["milestone"]])) == previous
+    finally:
+        restored = transact(oracle, "set_consensus_params", CTOR[2:8])
+        assert tx_execution_succeeded(restored), leader_return(restored)
+
+    claimed = transact(as_creator, "submit_claim", [milestone])
+    assert tx_execution_succeeded(claimed), leader_return(claimed)
+    record = read(oracle.get_milestone(args=[milestone]))
+    assert record["status"] == "deferred", record
+    assert record["deferred_until"] == record["observed_at"] + 60
+    wait_until(oracle, record["deferred_until"])
+    assert read(oracle.is_resolvable(args=[milestone]))["resolvable"] is True
+
+    stranger = oracle.connect(accounts[2])
+    resolved = transact(stranger, "resolve_deferred", [milestone])
+    assert tx_execution_succeeded(resolved), leader_return(resolved)
+    record = read(oracle.get_milestone(args=[milestone]))
+    assert record["status"] == "contested", record
+    assert record["attempts"] == 2
+    assert record["defer_rounds"] == 2
+    assert record["deferred_until"] == record["observed_at"] + 60
+    assert record["payout_atto"] == 0
+
+
 def test_a_milestone_refunds_the_sponsor_after_its_deadline(oracle, gl_client, creator):
     """
     Walks the clock forward for real: a short deadline, a wait, then a refund.
@@ -383,14 +416,12 @@ def test_a_milestone_refunds_the_sponsor_after_its_deadline(oracle, gl_client, c
     sponsor = read(oracle.get_milestone(args=[milestone]))["sponsor"]
 
     assert read(oracle.is_refundable(args=[milestone]))["refundable"] is False
-    time.sleep(100)
+    deadline = read(oracle.get_milestone(args=[milestone]))["deadline_ts"]
+    wait_until(oracle, deadline + 1)
     assert read(oracle.is_refundable(args=[milestone]))["refundable"] is True
 
     before = gl_client.get_balance(sponsor)
-    receipt = oracle.refund(args=[milestone]).transact(
-        wait_transaction_status=TransactionStatus.FINALIZED,
-        wait_triggered_transactions=True,
-    )
+    receipt = transact(oracle, "refund", [milestone], settle=True)
     assert tx_execution_succeeded(receipt), leader_return(receipt)
 
     record = read(oracle.get_milestone(args=[milestone]))
@@ -406,10 +437,7 @@ def test_a_sponsor_can_cancel_inside_the_creation_window(oracle, gl_client, crea
     sponsor = read(oracle.get_milestone(args=[milestone]))["sponsor"]
     before = gl_client.get_balance(sponsor)
 
-    receipt = oracle.cancel_milestone(args=[milestone]).transact(
-        wait_transaction_status=TransactionStatus.FINALIZED,
-        wait_triggered_transactions=True,
-    )
+    receipt = transact(oracle, "cancel_milestone", [milestone], settle=True)
     assert tx_execution_succeeded(receipt), leader_return(receipt)
     assert read(oracle.get_milestone(args=[milestone]))["status"] == "cancelled"
     assert gl_client.get_balance(sponsor) - before == REWARD
@@ -437,15 +465,14 @@ def test_escrow_accounting_balances_at_the_end(oracle):
 
 def test_administration_is_enforced_on_chain(oracle, accounts):
     stranger = oracle.connect(accounts[2])
-    receipt = stranger.set_paused(args=[True]).transact()
+    receipt = transact(stranger, "set_paused", [True])
     assert not tx_execution_succeeded(receipt)
     assert "[EXPECTED] owner only" in str(leader_return(receipt))
     pace()
 
 
 def test_a_platform_can_be_registered_on_a_live_deployment(oracle):
-    receipt = oracle.register_platform(
-        args=[
+    receipt = transact(oracle, "register_platform", [
             "devto",
             "DEV Community post",
             "views,likes,comments",
@@ -453,8 +480,7 @@ def test_a_platform_can_be_registered_on_a_live_deployment(oracle):
             "render_text",
             "2s",
             "reactions",
-        ]
-    ).transact()
+        ])
     assert tx_execution_succeeded(receipt), leader_return(receipt)
 
     record = read(oracle.get_platform(args=["devto"]))

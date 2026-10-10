@@ -13,7 +13,7 @@ validator then independently renders the content page, parses the metric the
 page displays, and adjudicates the claim. The reward is released only when
 validators agree the threshold was cleared.
 
-**Live on GenLayer Studio:** see [Deployment](#deployment).
+For deployment verification and network details, see [Deployment](#deployment).
 
 ---
 
@@ -337,7 +337,7 @@ attempt starts their next claim with a full set of re-checks.
 ## Escrow and money
 
 - `create_milestone` is payable. The GEN sent with the call **is** the escrow.
-- Value leaves the contract in exactly three ways: a validator-agreed pass, a
+- A milestone's escrow settles in three ways: a validator-agreed pass, a
   sponsor concession, or a refund to the recorded sponsor.
 - `refund` is permissionless. Anyone may poke a stalled milestone because the
   funds always route to the sponsor on record.
@@ -355,6 +355,14 @@ attempt starts their next claim with a full set of re-checks.
 Payouts and refunds are external messages from the intelligent contract to the
 chain layer, executed by the contract's ghost contract on finalisation.
 Beneficiary addresses must therefore be able to receive a plain value transfer.
+
+On hosted Studio, an incoming value transfer can be credited even when a
+payable call rolls back. The live host-rejection test confirmed this: no
+milestone was created, but its 0.001 GEN became unallocated surplus. Validate
+the URL, platform, creator, threshold and deadline before attaching value.
+`check_url` covers the URL and platform checks; it is not a full creation
+simulation. A rejected creation has no milestone ID to refund; returning that
+surplus requires the owner to call `withdraw_surplus` to the original sender.
 
 ### Cancellation is deliberately narrow
 
@@ -400,8 +408,11 @@ stricter. `resolve_keywords(platform, metric)` returns exactly the list the
 scanner will use, including the platform's own hints.
 
 Changes to either registry affect future adjudications only. A milestone's
-`band_bps`, `variance_bps` and `variance_floor` are copied onto it at creation
-and never change, so a sponsor's terms cannot be rewritten under them.
+`band_bps`, `variance_bps`, `variance_floor`, `defer_seconds`, `max_defer_rounds`,
+`resolution_grace_seconds` and `cancel_window_seconds` are copied onto it at
+creation and never change. Owner updates apply to new milestones. Existing
+claims keep their original re-check and refund windows, and an expired
+cancellation window cannot be reopened by changing the defaults.
 
 ---
 
@@ -416,7 +427,10 @@ genlayer account import --name sponsor --private-key 0x... --password "..."
 genlayer account use sponsor
 ```
 
-StudioNet is gasless, so a zero balance is fine there.
+Studio's wallet transaction layer is gasless. Escrowing a reward still requires
+GEN: fund the sponsor using Studio's account faucet before creating a milestone.
+Other networks or fee-enabled Studio deployments can also require protocol fees.
+See the [GenLayer value transfer guide](https://docs.genlayer.com/developers/intelligent-contracts/features/value-transfers).
 
 ### 2. Deploy your own instance
 
@@ -443,17 +457,55 @@ Constructor arguments, in order:
 
 All have defaults, so `genlayer deploy --contract ...` with no `--args` works.
 
+For a deployment that records its transaction ID, verifies the deployed source
+and defaults, and exercises a real payout, use the included script:
+
+```bash
+python3 scripts/deploy_studionet.py --smoke-test
+# After interrupted receipt polling, resume the saved IDs:
+python3 scripts/deploy_studionet.py --resume --smoke-test
+```
+
+The script loads `DEPLOYER_PRIVATE_KEY` from your environment or local `.env`
+and writes public recovery metadata to ignored `artifacts/studionet-deployment.json`.
+If a submission response is lost before its ID is known, it records that
+ambiguity and requires you to identify the original transaction before resuming.
+
 ### 3. Create a milestone
 
 ```bash
 # Check the URL first; costs nothing and locks nothing.
 genlayer call <address> check_url --args github "https://github.com/your-org/your-repo"
+```
 
-genlayer write <address> create_milestone \
-  --args 0xCreatorAddress \
-         "https://github.com/your-org/your-repo" \
-         github stars 10000 1800000000 \
-         "Q2 developer grant" 0 0 0
+Send the reward using the Python SDK's `value` parameter. The installed CLI's
+`write` command does not expose a reward-value option; a call without value
+reverts with `a reward must be escrowed`. With `DEPLOYER_PRIVATE_KEY` loaded
+from your environment:
+
+```python
+import os
+import time
+from genlayer_py import create_account, create_client
+from genlayer_py.chains import studionet
+from genlayer_py.types import TransactionStatus
+from gltest.assertions import tx_execution_succeeded
+
+client = create_client(
+    chain=studionet,
+    account=create_account(account_private_key=os.environ["DEPLOYER_PRIVATE_KEY"]),
+)
+tx_id = client.write_contract(
+    address="0xOracleAddress",
+    function_name="create_milestone",
+    args=["0xCreatorAddress", "https://github.com/your-org/your-repo",
+          "github", "stars", 10000, int(time.time()) + 7 * 86400,
+          "Q2 developer grant", 0, 0, 0],
+    value=10**15,  # 0.001 GEN escrow
+)
+print(tx_id)  # Save this before waiting; poll this ID if interrupted.
+receipt = client.wait_for_transaction_receipt(tx_id, status=TransactionStatus.ACCEPTED)
+assert tx_execution_succeeded(receipt), receipt
 ```
 
 `band_bps`, `variance_bps` and `variance_floor` take the contract defaults when
@@ -467,6 +519,8 @@ including the lines that actually decide the outcome:
 genlayer call <address> get_milestone --args m1
 # decision_lines: {threshold: 10000, band: 100,
 #                  certain_pass_at: 10100, certain_fail_below: 9900}
+# defer_seconds, max_defer_rounds, resolution_grace_seconds and
+# cancel_window_seconds also show the milestone's fixed timing terms.
 ```
 
 ### 4. Claim, as the creator
@@ -515,7 +569,11 @@ else:
 ```
 
 `is_claimable`, `is_resolvable` and `is_refundable` each return a boolean, a
-human-readable `reason`, and the relevant timestamps. Each is checked against
+human-readable `reason`, and the relevant timestamps. Claim and re-check
+predicates account for pauses and disabled readers. A closed resolution window
+directs the bot to refund even when the next re-check has not unlocked. These
+views describe state and timing eligibility; caller permissions and external
+page/model availability are still checked by the write. Each is checked against
 the call it predicts in the test suite.
 
 ### 6. Call it from another intelligent contract
@@ -676,7 +734,7 @@ genvm-lint check contracts/content_milestone_oracle.py
 pytest tests/direct -q
 ```
 
-377 tests in about 16 seconds. Every one of the contract's 43 public methods is
+389 tests in about 17 seconds. Every one of the contract's 43 public methods is
 exercised. Coverage is organised as:
 
 | File | Covers |
@@ -690,6 +748,7 @@ exercised. Coverage is organised as:
 | `test_registry.py` | Both registries, administration, ownership, configuration bounds |
 | `test_views.py` | Indexes, pagination, status tallies, the predicate views |
 | `test_resilience.py` | Failure classification, HTTP status mapping, and nine ways a model response can be unusable |
+| `test_term_guards.py` | Fixed timing terms after admin updates, predicate/write guard parity, closed resolution windows and URL preflight |
 
 The validator half of consensus is genuinely tested in direct mode, not stubbed.
 `gltest` captures the closure the contract hands to `gl.vm.run_nondet`, so a test
@@ -729,28 +788,66 @@ The suite asserts validator votes, that the reward genuinely leaves the contract
 deterministic rejections carry identical messages on every node, and that the
 final escrow total equals the number of unsettled milestones times the reward.
 
-To run the integration suite from a specific account, set
-`DEPLOYER_PRIVATE_KEY`. No key is committed to this repository.
+Verified on StudioNet on 2026-10-10: **21 tests passed in 17 minutes 14 seconds**,
+including a permissionless re-check after owner default changes, creator and
+sponsor balance movements, cancellation, refund and final escrow accounting.
+The test deployment uses shorter timing defaults; the deployment below uses the
+documented six-hour production default.
+
+To run the integration suite from a specific funded sponsor account, set
+`DEPLOYER_PRIVATE_KEY`. No key is committed to this repository. Submission is
+performed once, and transaction IDs are saved before polling in the ignored
+`artifacts/live-run.json`. Retry receipt reads for a saved ID after a network
+failure; do not resubmit an ambiguous deployment or write. Every transaction
+requires actual validator agreement, and payout checks verify execution before
+reading balances.
+
+The harness has additional offline regression checks for lost submission
+responses, read retries, missing votes, receipt parsing and failed child transfers:
+
+```bash
+pytest -p no:gltest -p no:gltest_direct tests/harness -q
+```
+
+All 14 offline checks pass. GitHub Actions runs lint, direct tests and these
+recovery checks on every push and pull request; live tests require a funded
+network account and run separately.
 
 ---
 
 ## Deployment
 
-Live on GenLayer Studio:
+Verified on hosted StudioNet on 2026-10-10 with the constructor defaults:
 
-- **Contract:** `0x4CC58F7bFaE130C98c0b5bE1A44E73eA9Ef64f3c`
-- **Explorer:** https://explorer-studio.genlayer.com/address/0x4CC58F7bFaE130C98c0b5bE1A44E73eA9Ef64f3c
+- **Contract:** `0x555a04bDB15aa8E9972ad8EbA65236A3e4f7Ef36`
 - **Deployer / owner:** `0xBC1399c55538eC034d4Da550C03c34Ae0C357f53`
 - **Runner:** `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6`
+- **Deployment transaction:** `0xecb84b0428e35e197bc68eada8455d6494c7b999749c17f6dc5d4914fbe9bf24`
+- **Source SHA-256:** `576c3a6f5a6ec44192117c6afdc165b45f29f77942f8e4dfe7332e28f3338c5e`
 
-Read it directly:
+The deployed source matches `contracts/content_milestone_oracle.py` byte for
+byte. Configuration reads confirmed the owner, six-hour re-check, four-round
+contested limit, two-day resolution grace and one-hour cancellation window.
+A real 0.001 GEN escrow on milestone `m1` achieved its 5,000-star threshold with
+an observed value of 51,400 and validator agreement. The payout was finalised;
+contract balance and outstanding escrow are both zero.
+
+- **Smoke creation:** `0x79b6cb7ee62fc48d13db981195a0dd9cb9c773320046f795dc3305e82fc69cf7`
+- **Smoke claim:** `0x2835cf79a7c107948efab7520b2b6f8c0ffd19f9d1733bb7a33b27288f70ebe0`
+
+Read the live deployment with:
 
 ```bash
 genlayer network set studionet
-genlayer call 0x4CC58F7bFaE130C98c0b5bE1A44E73eA9Ef64f3c get_config
-genlayer call 0x4CC58F7bFaE130C98c0b5bE1A44E73eA9Ef64f3c list_platforms
-genlayer call 0x4CC58F7bFaE130C98c0b5bE1A44E73eA9Ef64f3c preview_agreement --args m1 10130 10040
+genlayer call 0x555a04bDB15aa8E9972ad8EbA65236A3e4f7Ef36 get_config
+genlayer call 0x555a04bDB15aa8E9972ad8EbA65236A3e4f7Ef36 list_platforms
+genlayer call 0x555a04bDB15aa8E9972ad8EbA65236A3e4f7Ef36 get_milestone --args m1
 ```
+
+The corrected source appends timing fields to milestone storage. Historical
+instances do not acquire these fixes. The previously documented address
+`0x4CC58F7bFaE130C98c0b5bE1A44E73eA9Ef64f3c` could not be found on the current
+Studio endpoint and is superseded by the verified deployment above.
 
 The runner version is pinned deliberately. GenLayer networks reject
 `py-genlayer:test`, `py-genlayer:latest` and unversioned aliases, and pinning
