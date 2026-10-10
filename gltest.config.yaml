@@ -1,0 +1,25 @@
+paths:
+  contracts: contracts/
+  artifacts: artifacts/
+
+networks:
+  # Override with `gltest --network studionet`.
+  default: localnet
+
+  localnet:
+    # GenLayer Studio running locally via `genlayer up`.
+    leader_only: false
+
+  studionet:
+    # studio.genlayer.com. Gasless, so a zero balance is fine, but rate limited
+    # to 60 requests a minute. Integration runs here are paced accordingly.
+    leader_only: false
+
+  # To run the suite against Testnet Bradbury, uncomment this block and export
+  # the two private keys first. gltest resolves ${...} at config load time, so
+  # leaving it enabled without the variables set aborts every run.
+  #
+  # testnet_bradbury:
+  #   accounts:
+  #     - "${ACCOUNT_PRIVATE_KEY_1}"
+  #     - "${ACCOUNT_PRIVATE_KEY_2}"
