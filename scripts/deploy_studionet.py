@@ -91,7 +91,7 @@ def main():
             parser.error("no recovery record exists to resume")
         state = {"network": "studionet", "owner": account.address, "source_sha256": digest}
 
-    deployed = send_once(client, args.record, state, "deployment", lambda: client.deploy_contract(code=source, args=[]))
+    deployed = send_once(client, args.record, state, "deployment", lambda: client.deploy_contract(code=source, args=[]), finalized=True)
     address = extract_contract_address(deployed)
     state["address"] = address
     save(args.record, state)
@@ -117,16 +117,24 @@ def main():
                   5_000, state["smoke_deadline"], "Verified deployment smoke test", 0, 0, 0], value=reward,
         ))
         mid = json.loads(created["consensus_data"]["leader_receipt"][0]["result"]["payload"]["readable"])
+        assert isinstance(mid, str), "creation was rejected; recover the sender credit before continuing"
         claimed = send_once(client, args.record, state, "smoke_claim", lambda: client.write_contract(
             address=address, function_name="submit_claim", args=[mid],
         ), finalized=True)
-        for child in claimed.get("triggered_transactions", []):
-            receipt = client.wait_for_transaction_receipt(child, status=TransactionStatus.FINALIZED, interval=6_000, retries=100)
-            assert receipt.get("type") == 0 and receipt.get("value_credited") is True, receipt
+        from milestone_client import MilestoneDriver
+        journal = args.record.with_name(args.record.stem + "-withdrawals.json")
+        driver = MilestoneDriver(client, address, journal)
+        if "smoke_balance_before_withdrawal" not in state:
+            state["smoke_balance_before_withdrawal"] = client.get_balance(account.address)
+            save(args.record, state)
+        payment = driver.withdraw("smoke_withdrawal", account.address, reward)
+        assert payment["status"] == "delivered" and payment["amount_atto"] == reward, payment
+        assert client.get_balance(account.address) >= state["smoke_balance_before_withdrawal"] + reward
+        state["smoke_payment"] = payment
         milestone = client.read_contract(address=address, function_name="get_milestone", args=[mid])
         treasury = client.read_contract(address=address, function_name="get_treasury", args=[])
         assert milestone["status"] == "achieved" and milestone["payout_atto"] == reward, milestone
-        assert treasury["balance_atto"] == 0 and treasury["escrowed_atto"] == 0, treasury
+        assert treasury["balance_atto"] == 0 and treasury["escrowed_atto"] == 0 and treasury["credits_atto"] == 0 and treasury["queued_atto"] == 0, treasury
         state["smoke_milestone"] = milestone
         state["treasury"] = treasury
         state["smoke_verified"] = True

@@ -20,13 +20,13 @@ from conftest import generic_page, github_page, youtube_page
     "token,mult,expected_subset",
     [
         ("1234", 1, {1234}),
-        ("12,431", 1, {12431, 12, 431}),
-        ("12.431", 1, {12431, 12, 431}),
-        ("1,234,567", 1, {1234567, 1, 234, 567}),
-        ("1.2", 1000, {1200, 1000, 12000}),
-        ("12.4", 1000, {12400, 12000, 124000}),
-        ("1.5", 1000000, {1500000, 1000000, 15000000}),
-        ("2.35", 1000000000, {2350000000, 2000000000}),
+        ("12,431", 1, {12431}),
+        ("12.431", 1, {12431}),
+        ("1,234,567", 1, {1234567}),
+        ("1.2", 1000, {1200}),
+        ("12.4", 1000, {12400}),
+        ("1.5", 1000000, {1500000}),
+        ("2.35", 1000000000, {2350000000}),
         ("12", 1000, {12000}),
         ("0", 1, {0}),
     ],
@@ -44,8 +44,7 @@ def test_interpret_number_handles_unicode_group_separators(helpers):
     for separator in helpers._GROUPING_SPACES:
         produced = set(helpers._interpret_number(f"12{separator}431", 1))
         assert 12431 in produced
-        assert 12 in produced
-        assert 431 in produced
+        assert produced == {12431}
 
 
 def test_interpret_number_rejects_non_numeric_and_oversized(helpers):
@@ -72,11 +71,11 @@ def test_scanner_expands_abbreviations(helpers):
     assert 18000000 in candidates
 
 
-def test_scanner_keeps_the_unabbreviated_reading_too(helpers):
-    """A trailing letter may be a magnitude suffix or may not be, so keep both."""
+def test_scanner_does_not_strip_an_explicit_magnitude_suffix(helpers):
+    """An explicit magnitude suffix has exactly its canonical expansion."""
     candidates = helpers._numeric_candidates("5K followers")
     assert 5000 in candidates
-    assert 5 in candidates
+    assert 5 not in candidates
 
 
 def test_scanner_ignores_a_suffix_letter_that_starts_a_word(helpers):
@@ -167,14 +166,14 @@ def test_gate_rejects_everything_when_the_page_yielded_nothing(helpers):
     assert helpers._value_is_on_page(100, []) is False
 
 
-def test_gate_allows_half_a_percent_of_rounding_slack(helpers):
+def test_gate_rejects_rounding_slack_for_unprinted_values(helpers):
     # 12.4K expanded as 12400 by the scanner and 12430 by the model.
-    assert helpers._value_is_on_page(12430, [12400]) is True
+    assert helpers._value_is_on_page(12430, [12400]) is False
     assert helpers._value_is_on_page(12500, [12400]) is False
 
 
-def test_gate_slack_never_drops_below_one(helpers):
-    assert helpers._value_is_on_page(3, [4]) is True
+def test_gate_has_no_slack_even_for_small_counts(helpers):
+    assert helpers._value_is_on_page(3, [4]) is False
     assert helpers._value_is_on_page(3, [6]) is False
 
 

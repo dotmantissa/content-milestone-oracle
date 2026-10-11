@@ -1,6 +1,6 @@
 paths:
   contracts: contracts/
-  artifacts: artifacts/
+  artifacts: .gltest_cache/artifacts/
 
 networks:
   # Override with `gltest --network studionet`.

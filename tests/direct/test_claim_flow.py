@@ -77,10 +77,10 @@ def test_the_evidence_record_captures_how_the_reading_was_obtained(
     assert evidence["found"] is True
     assert evidence["value"] == 12_431
     assert evidence["zone"] == "pass"
-    assert evidence["display"] == "12,431 stars"
-    assert evidence["keyword_scoped"] is True
-    assert evidence["candidates"] > 0
-    assert evidence["page_chars"] > 0
+    assert evidence["display"] == "12431 stars"
+    assert evidence["evidence_version"] == 2
+    assert evidence["reader_spec"]["fetch_mode"] == "render_text"
+    assert len(evidence["reader_hash"]) == 64
     assert evidence["round"] == 1
     assert evidence["at"] == oracle.now_ts()
 
@@ -240,7 +240,7 @@ def test_claiming_is_blocked_while_paused(
     assert oracle.is_claimable(mid)["reason"] == "contract is paused"
 
 
-def test_a_claim_on_a_platform_disabled_after_creation_is_refused(
+def test_disabling_a_platform_does_not_rewrite_a_funded_milestone(
     oracle, make_milestone, direct_vm, direct_owner, direct_alice, direct_bob
 ):
     mid = make_milestone(oracle, direct_alice, direct_bob)
@@ -248,10 +248,8 @@ def test_a_claim_on_a_platform_disabled_after_creation_is_refused(
     oracle.set_platform_enabled("github", False)
     set_scene(direct_vm, GITHUB_URL, github_page("12,431"), 12_431)
     direct_vm.sender = direct_bob
-    with direct_vm.expect_revert("platform `github` is disabled"):
-        oracle.submit_claim(mid)
-    # The escrow stays reachable: disabling a reader must not trap funds.
-    assert oracle.get_milestone(mid)["status"] == "open"
+    assert oracle.submit_claim(mid)["status"] == "achieved"
+    assert oracle.credit_of(direct_bob) == 5 * GEN
 
 
 # ---------------------------------------------------------------------------

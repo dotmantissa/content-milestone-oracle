@@ -10,6 +10,7 @@ validator vote is mocked.
     gltest tests/integration -v -s --network studionet
 """
 
+import json
 import time
 
 import pytest
@@ -145,9 +146,10 @@ def test_the_evidence_record_explains_the_reading(live_reading, oracle):
     assert evidence["found"] is True
     assert evidence["zone"] == "pass"
     assert evidence["value"] == live_reading["value"]
-    assert evidence["keyword_scoped"] is True, evidence
-    assert evidence["candidates"] > 0
-    assert evidence["page_chars"] > 1_000, evidence
+    assert evidence["evidence_version"] == 2
+    assert evidence["lower"] <= evidence["value"] <= evidence["upper"]
+    assert evidence["reader_spec"]["fetch_mode"] == "render_text"
+    assert len(evidence["reader_hash"]) == 64
     assert evidence["display"], "the reading should quote the page text"
     print(f"\nlive evidence: {evidence}")
 
@@ -263,7 +265,7 @@ def test_a_sponsor_can_concede_a_borderline_claim(
 
     before = gl_client.get_balance(creator.address)
     pace()
-    receipt = transact(oracle, "concede", [milestone], settle=True)
+    receipt = transact(oracle, "concede", [milestone], settle=True, withdraw_as=as_creator)
     assert tx_execution_succeeded(receipt), leader_return(receipt)
 
     record = read(oracle.get_milestone(args=[milestone]))
@@ -323,8 +325,10 @@ def test_a_url_outside_the_platform_host_list_is_rejected(oracle, creator):
             0,
             0,
         ], value=REWARD)
-    assert not tx_execution_succeeded(receipt)
-    assert "is not covered by platform `github`" in str(leader_return(receipt))
+    assert tx_execution_succeeded(receipt)
+    rejection = json.loads(leader_return(receipt))
+    assert rejection["status"] == "rejected"
+    assert "is not covered by platform `github`" in rejection["reason"]
     pace()
 
 

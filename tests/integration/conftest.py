@@ -24,6 +24,7 @@ Notes on running these:
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -33,6 +34,9 @@ from gltest.assertions import tx_execution_succeeded
 from gltest.clients import get_gl_client
 from gltest.utils import extract_contract_address
 from genlayer_py.types import TransactionStatus
+
+# gltest invokes pytest with its own import path rather than the repository root.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 CONTRACT_NAME = "ContentMilestoneOracle"
 
@@ -158,7 +162,7 @@ def now_ts(oracle) -> int:
 
 def checkpoint(operation, tx_id, *, receipt=None, address=None):
     """Keep non-secret transaction recovery metadata in ignored artifacts."""
-    path = Path("artifacts/live-run.json")
+    path = Path("artifacts/remediation/live-run.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     state = json.loads(path.read_text()) if path.exists() else []
     entry = {"operation": operation, "transaction_id": str(tx_id), "at": int(time.time())}
@@ -198,8 +202,9 @@ def wait_receipt(tx_id, *, settle=False):
     return receipt
 
 
-def transact(oracle, method, args, *, value=0, settle=False):
+def transact(oracle, method, args, *, value=0, settle=False, withdraw_as=None):
     """Send once, checkpoint, then safely poll the same transaction ID."""
+    checkpoint(method, "submission_unknown", address=oracle.address)
     tx_id = get_gl_client().write_contract(
         address=oracle.address, function_name=method, args=args,
         account=oracle.account, value=value,
@@ -208,6 +213,19 @@ def transact(oracle, method, args, *, value=0, settle=False):
     receipt = wait_receipt(tx_id, settle=settle)
     checkpoint(method, tx_id, receipt=receipt)
     assert_consensus(receipt)
+    if settle and method in ("submit_claim", "concede", "refund", "cancel_milestone"):
+        assert tx_execution_succeeded(receipt), leader_return(receipt)
+        from scripts.milestone_client import MilestoneDriver
+        beneficiary = withdraw_as or oracle
+        record = read(oracle.get_milestone(args=[args[0]]))
+        amount = record["payout_atto"] if record["status"] == "achieved" else record["reward_atto"]
+        if amount:
+            assert read(beneficiary.credit_of(args=[beneficiary.account.address])) >= amount
+            driver = MilestoneDriver(get_gl_client(), oracle.address,
+                Path("artifacts/remediation") / ("withdrawals-" + oracle.address + "-" + beneficiary.account.address + ".json"))
+            payment = driver.withdraw(method + "." + str(tx_id), beneficiary.account.address,
+                                      amount, account=beneficiary.account)
+            assert payment["status"] == "delivered", payment
     return receipt
 
 

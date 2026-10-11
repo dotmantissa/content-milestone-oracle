@@ -35,7 +35,7 @@ def test_a_platform_record_is_fully_inspectable(oracle):
     assert "stars" in github["metrics"]
     assert github["hosts"] == ["github.com"]
     assert github["fetch_mode"] == "render_text"
-    assert github["wait_after_loaded"] == "0ms"
+    assert github["wait_after_loaded"] == "4s"
     assert github["enabled"] is True
     assert github["registered_at"] == oracle.now_ts()
 
@@ -44,7 +44,7 @@ def test_javascript_heavy_platforms_wait_before_reading(oracle):
     """A count that only appears after hydration needs the renderer to settle."""
     assert oracle.get_platform("youtube")["wait_after_loaded"] == "4s"
     assert oracle.get_platform("x")["wait_after_loaded"] == "5s"
-    assert oracle.get_platform("github")["wait_after_loaded"] == "0ms"
+    assert oracle.get_platform("github")["wait_after_loaded"] == "4s"
 
 
 def test_an_unknown_platform_or_metric_is_reported_clearly(oracle, direct_vm):

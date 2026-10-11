@@ -61,7 +61,7 @@ def test_receipt_retry_preserves_the_submitted_id(live_helpers, monkeypatch):
     assert client.write_contract.call_count == 1
     assert client.wait_for_transaction_receipt.call_count == 2
     assert all(call.kwargs["transaction_hash"] == "tx-id" for call in client.wait_for_transaction_receipt.call_args_list)
-    recovery = Path("artifacts/live-run.json").read_text()
+    recovery = Path("artifacts/remediation/live-run.json").read_text()
     assert '"transaction_id": "tx-id"' in recovery
 
 

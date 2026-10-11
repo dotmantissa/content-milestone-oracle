@@ -255,7 +255,7 @@ def make_milestone(direct_vm):
         direct_vm.sender = sponsor
         direct_vm.value = reward
         try:
-            return contract.create_milestone(
+            result = contract.create_milestone(
                 creator,
                 url,
                 platform,
@@ -267,6 +267,10 @@ def make_milestone(direct_vm):
                 variance_bps,
                 variance_floor,
             )
+            if isinstance(result, dict):
+                from genlayer import gl
+                raise gl.vm.UserError(result["reason"])
+            return result
         finally:
             direct_vm.value = 0
 

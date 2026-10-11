@@ -77,7 +77,7 @@ def test_owner_cannot_change_an_existing_cancellation_window(
 
 
 @pytest.mark.parametrize("action", ["claim", "resolve"])
-@pytest.mark.parametrize("guard", ["pause", "platform"])
+@pytest.mark.parametrize("guard", ["pause"])
 def test_predicates_match_adjudication_guards(
     oracle, make_milestone, direct_vm, direct_owner, direct_alice, direct_bob,
     claim, action, guard
@@ -130,8 +130,11 @@ def test_url_preflight_rejects_urls_too_long_to_create(
     assert oracle.check_url("github", url)["ok"] is False
     direct_vm.sender = direct_alice
     direct_vm.value = 1
-    with direct_vm.expect_revert("content_url must be"):
-        oracle.create_milestone(direct_bob, url, "github", "stars", 10_000, oracle.now_ts() + DAY)
+    result = oracle.create_milestone(direct_bob, url, "github", "stars", 10_000, oracle.now_ts() + DAY)
+    assert result["status"] == "rejected"
+    assert "content_url must be" in result["reason"]
+    assert oracle.credit_of(direct_alice) == 1
+    direct_vm.value = 0
 
 
 def test_disabled_platform_url_preflight_explains_rejection(oracle, direct_vm, direct_owner):

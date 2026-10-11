@@ -267,7 +267,7 @@ def test_the_alternate_key_names_models_use_are_accepted(
         raw='{"present": true, "count": 12431, "explanation": "header counter"}',
     )
     assert out["observed_value"] == 12_431
-    assert out["reason"] == "header counter"
+    assert out["reason"] == "Independent validators agreed on zone pass"
 
 
 def test_a_string_boolean_for_found_is_accepted(
@@ -334,25 +334,20 @@ def test_a_value_the_page_does_not_show_is_rejected(
         )
 
 
-def test_the_gate_lets_a_number_that_is_on_the_page_through(
+def test_the_gate_rejects_an_adjacent_rival_metric(
     oracle, pending, direct_vm, direct_bob
 ):
     """
     The model still chooses which number is the metric, and choosing wrong is
     what the validator's independent read catches, not the gate.
     """
-    out = claim_with(
-        direct_vm,
-        oracle,
-        direct_bob,
-        pending,
-        page=github_page("8,100", forks="12,431"),
-        raw='{"found": true, "value": 12431}',
-    )
-    assert out["observed_value"] == 12_431
+    with direct_vm.expect_revert("page scanner did not find"):
+        claim_with(direct_vm, oracle, direct_bob, pending,
+                   page=github_page("8,100", forks="12,431"),
+                   raw='{"found": true, "value": 12431}')
 
 
-def test_an_overlong_display_string_is_clipped_before_storage(
+def test_unverified_model_display_and_reason_are_not_stored(
     oracle, pending, direct_vm, direct_bob
 ):
     out = claim_with(
@@ -362,11 +357,11 @@ def test_an_overlong_display_string_is_clipped_before_storage(
         pending,
         raw=json.dumps({"found": True, "value": 12431, "display": "s" * 500, "reason": "r" * 500}),
     )
-    assert len(out["display"]) == 120
-    assert len(out["reason"]) == 200
+    assert out["display"] == "12431 stars"
+    assert out["reason"] == "Independent validators agreed on zone pass"
     evidence = json.loads(oracle.get_evidence(pending))
-    assert len(evidence["display"]) == 120
-    assert len(evidence["reason"]) == 200
+    assert evidence["display"] == "12431 stars"
+    assert evidence["reason"] == "Independent validators agreed on zone pass"
 
 
 def test_a_page_with_no_numbers_at_all_rejects_any_claimed_value(

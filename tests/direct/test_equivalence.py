@@ -164,7 +164,7 @@ def test_a_leader_conclusion_the_validator_cannot_support_disagrees(helpers):
     result = report(helpers, 10_130, 10_040)
     assert result["gap"] <= result["combined_allowance"]
     assert result["agree"] is False
-    assert "only supports" in result["reason"]
+    assert "independently concluded" in result["reason"]
     assert result["span_low_zone"] == "borderline"
     assert result["span_high_zone"] == "borderline"
 

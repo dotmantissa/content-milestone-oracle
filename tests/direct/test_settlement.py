@@ -348,8 +348,10 @@ def test_only_the_sponsor_can_top_up(
     direct_vm.sender = direct_bob
     direct_vm.value = GEN
     try:
-        with direct_vm.expect_revert("sponsor only"):
-            oracle.top_up(mid)
+        result = oracle.top_up(mid)
+        assert result["status"] == "rejected"
+        assert "sponsor only" in result["reason"]
+        assert oracle.credit_of(direct_bob) == GEN
     finally:
         direct_vm.value = 0
 
@@ -371,8 +373,10 @@ def test_a_settled_milestone_cannot_be_topped_up(
     direct_vm.sender = direct_alice
     direct_vm.value = GEN
     try:
-        with direct_vm.expect_revert("is achieved"):
-            oracle.top_up(mid)
+        result = oracle.top_up(mid)
+        assert result["status"] == "rejected"
+        assert "is achieved" in result["reason"]
+        assert oracle.credit_of(direct_alice) == GEN
     finally:
         direct_vm.value = 0
 
@@ -407,7 +411,7 @@ def test_escrow_is_tracked_across_many_live_milestones(
     assert treasury["total_refunded_atto"] == 7 * GEN
 
 
-def test_the_owner_can_only_withdraw_unescrowed_surplus(
+def test_the_owner_cannot_sweep_unattributed_deposits(
     oracle, make_milestone, direct_vm, direct_owner, direct_alice, direct_bob
 ):
     make_milestone(oracle, direct_alice, direct_bob, reward=5 * GEN)
@@ -416,9 +420,9 @@ def test_the_owner_can_only_withdraw_unescrowed_surplus(
     assert surplus == treasury["balance_atto"] - 5 * GEN
 
     direct_vm.sender = direct_owner
-    with direct_vm.expect_revert("is unescrowed surplus"):
-        oracle.withdraw_surplus(direct_owner, surplus + 1)
-    oracle.withdraw_surplus(direct_owner, surplus)
+    with direct_vm.expect_revert("owner surplus withdrawal is disabled"):
+        oracle.withdraw_surplus(direct_owner, surplus)
+    assert oracle.get_treasury()["owner_withdrawable_atto"] == 0
 
 
 def test_only_the_owner_can_withdraw_surplus(
@@ -431,7 +435,7 @@ def test_only_the_owner_can_withdraw_surplus(
 
 def test_a_zero_surplus_withdrawal_is_refused(oracle, direct_vm, direct_owner):
     direct_vm.sender = direct_owner
-    with direct_vm.expect_revert("amount must be positive"):
+    with direct_vm.expect_revert("owner surplus withdrawal is disabled"):
         oracle.withdraw_surplus(direct_owner, 0)
 
 
