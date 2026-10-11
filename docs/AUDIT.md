@@ -47,7 +47,7 @@ explicit recovery-donation pool for any source-debited shortfall. Failed
 deposit recovery and other withdrawals cannot consume that pool. Raw balance
 growth is never sufficient proof that a particular withdrawal was refunded.
 
-## Reviewer-style note on the audited baseline
+## Reviewer-style note covering the discovered shortcomings
 
 > The contract cannot be accepted because validator agreement does not bind a
 > single settlement outcome: pass, borderline and even small-count failure can
@@ -64,8 +64,8 @@ growth is never sufficient proof that a particular withdrawal was refunded.
 > preserve depositor ownership and immutable terms, document truthful timing,
 > complete lifecycle verification, and submit matching source and deployment.
 
-This note describes the original findings, not a rejection of the corrected
-implementation. No mission brief was supplied, so verification establishes the
+This note summarizes issues found before remediation was complete, not a
+rejection of the corrected implementation. No mission brief was supplied, so verification establishes the
 repository's disclosed behavior and does not guarantee Portal acceptance.
 
 ## Verification limits

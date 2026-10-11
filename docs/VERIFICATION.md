@@ -78,7 +78,15 @@ redeposit and EOA redemption were executed on chain. The EOA ticket was
 confirmed by `0x37ca92ef1baa043025fbf87116b1edb3e4b9478eea74e038f9efe9250caf199f`
 after an integration helper initially mishandled the native child's absent
 GenVM consensus receipt; the existing transfer was not replayed. The helper now
-checks native value credit separately, and the complete case is rerun.
+checks native value credit separately. The uninterrupted corrected full case
+passed in 743.50 seconds against final-source oracle
+`0x549274EF268B954b4F05172d59269791B3Ea1aAf`, including the exact EOA balance
+increase. Its final confirmation was
+`0x9cff888d4a738f51b6972569fc8f4097a5f212c69b4bc1ee35e09079b96b8958`.
+
+Across the documented remediation runs, all 33 distinct live integration cases
+passed after focused fixes/reruns. Final local and matching code CI checks also
+passed; the workflow is [Contract checks](https://github.com/dotmantissa/content-milestone-oracle/actions/workflows/tests.yml).
 
 An isolated deposit-fault fixture also verified the programme's own-sender
 recovery forwarding and EOA redemption. A deliberately rejecting IC receiver
